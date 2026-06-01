@@ -1,0 +1,153 @@
+---
+- name: RHEL Security Hardening
+  hosts: servers
+  become: true
+  gather_facts: true
+
+  vars:
+    ssh_port: 22
+    firewall_ports:
+      - "22/tcp"
+      - "80/tcp"
+      - "443/tcp"
+      - "8080/tcp"
+
+  tasks:
+
+  #################################################################
+  # PACKAGES
+  #################################################################
+  - name: Install required packages
+    dnf:
+      name:
+        - sudo
+        - openssh-server
+        - audit
+        - firewalld
+        - chrony
+        - rsyslog
+        - vim-enhanced
+        - aide
+        - podman
+        - policycoreutils
+        - selinux-policy-targeted
+      state: present
+
+  #################################################################
+  # ZABBIX AGENT 2
+  #################################################################
+  - name: Install Zabbix repository
+    dnf:
+      name: https://repo.zabbix.com/zabbix/7.4/release/rhel/{{ ansible_distribution_major_version }}/noarch/zabbix-release-latest-7.4.el{{ ansible_distribution_major_version }}.noarch.rpm
+      disable_gpg_check: true
+      state: present
+
+  - name: Clean DNF cache
+    command: dnf clean all
+    changed_when: false
+
+  - name: Install Zabbix Agent2
+    dnf:
+      name:
+        - zabbix-agent2
+      state: latest
+
+  - name: Enable and start Zabbix Agent2
+    service:
+      name: zabbix-agent2
+      enabled: true
+      state: started
+
+  #################################################################
+  # SERVICES
+  #################################################################
+  - name: Enable auditd
+    service:
+      name: auditd
+      enabled: true
+      state: started
+
+  - name: Enable chronyd
+    service:
+      name: chronyd
+      enabled: true
+      state: started
+
+  - name: Enable rsyslog
+    service:
+      name: rsyslog
+      enabled: true
+      state: started
+
+  #################################################################
+  # SSH HARDENING
+  #################################################################
+  - name: Disable root login
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?PermitRootLogin'
+      line: 'PermitRootLogin no'
+
+  - name: Disable password authentication
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?PasswordAuthentication'
+      line: 'PasswordAuthentication no'
+
+  - name: Configure idle timeout
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?ClientAliveInterval'
+      line: 'ClientAliveInterval 300'
+
+  - name: Configure idle count max
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?ClientAliveCountMax'
+      line: 'ClientAliveCountMax 0'
+
+  - name: Restart SSH
+    service:
+      name: sshd
+      state: restarted
+  #################################################################
+  # FIREWALL
+  #################################################################
+  - name: Open required ports
+    command: "firewall-cmd --permanent --add-port={{ item }}"
+    loop: "{{ firewall_ports }}"
+
+  - name: Reload firewall
+    command: firewall-cmd --reload
+  #################################################################
+  # SYSCTL HARDENING
+  #################################################################
+  - name: Apply kernel hardening
+    command: "sysctl -w {{ item.name }}={{ item.value }}"
+    loop:
+      - { name: "net.ipv4.ip_forward", value: "0" }
+      - { name: "net.ipv4.conf.all.accept_redirects", value: "0" }
+      - { name: "net.ipv4.conf.default.accept_redirects", value: "0" }
+      - { name: "net.ipv4.conf.all.send_redirects", value: "0" }
+      - { name: "net.ipv4.conf.default.send_redirects", value: "0" }
+      - { name: "net.ipv4.conf.all.rp_filter", value: "1" }
+      - { name: "kernel.randomize_va_space", value: "2" }
+
+  - name: Persist sysctl settings
+    copy:
+      dest: /etc/sysctl.d/99-hardening.conf
+      content: |
+        net.ipv4.ip_forward=0
+        net.ipv4.conf.all.accept_redirects=0
+        net.ipv4.conf.default.accept_redirects=0
+        net.ipv4.conf.all.send_redirects=0
+        net.ipv4.conf.default.send_redirects=0
+        net.ipv4.conf.all.rp_filter=1
+        kernel.randomize_va_space=2
+  #################################################################
+  # AIDE
+  #################################################################
+  - name: Initialize AIDE database
+    command: aide --init
+    args:
+      creates: /var/lib/aide/aide.db.gz
